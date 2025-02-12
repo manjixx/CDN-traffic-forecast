@@ -358,4 +358,186 @@ class HybridModel(nn.Module):
 - **计算成本高**：Attention 机制增加了模型复杂度。
 - **实现复杂**：需要设计合理的 Attention 层和特征融合逻辑。
 
+在使用LSTM模型预测连续值时，选择合适的考核指标至关重要，这些指标应能全面反映模型的预测精度、稳定性以及对时间序列特征的捕捉能力。以下是推荐的评估指标及其详细说明：
 
+---
+
+### **1. 基础回归指标**
+#### **(1) 均方根误差（Root Mean Squared Error, RMSE）**
+- **公式**：
+  \[
+  \text{RMSE} = \sqrt{\frac{1}{n} \sum_{i=1}^{n} (y_i - \hat{y}_i)^2}
+  \]
+- **特点**：
+  - 对较大误差敏感（平方项放大误差），适合关注极端值的场景。
+  - 单位与原始数据一致，易于解释。
+- **适用场景**：需惩罚大误差的预测任务，如流量峰值预测。
+
+#### **(2) 平均绝对误差（Mean Absolute Error, MAE）**
+- **公式**：
+  \[
+  \text{MAE} = \frac{1}{n} \sum_{i=1}^{n} |y_i - \hat{y}_i|
+  \]
+- **特点**：
+  - 对异常值鲁棒，反映平均误差水平。
+  - 无法区分误差方向（正负误差权重相同）。
+- **适用场景**：需评估整体平均误差，如日常流量预测。
+
+#### **(3) 平均绝对百分比误差（Mean Absolute Percentage Error, MAPE）**
+- **公式**：
+  \[
+  \text{MAPE} = \frac{100\%}{n} \sum_{i=1}^{n} \left| \frac{y_i - \hat{y}_i}{y_i} \right|
+  \]
+- **特点**：
+  - 以百分比形式表示误差，直观易懂。
+  - 当真实值接近零时不稳定，且对负误差处理不友好。
+- **适用场景**：数据无零值且需百分比误差分析，如增长率预测。
+
+#### **(4) 决定系数（R² Score）**
+- **公式**：
+  \[
+  R^2 = 1 - \frac{\sum_{i=1}^{n} (y_i - \hat{y}_i)^2}{\sum_{i=1}^{n} (y_i - \bar{y})^2}
+  \]
+- **特点**：
+  - 衡量模型对数据方差的解释能力，值越接近1表示拟合越好。
+  - 无单位限制，适合模型间的横向对比。
+- **适用场景**：评估模型相对于简单基准（如均值预测）的提升效果。
+
+---
+
+### **2. 时间序列特有指标**
+#### **(1) 多步滚动预测误差**
+- **方法**：分步预测未来多个时间点（如1步、3步、6步），分别计算各步长的RMSE/MAE。
+- **意义**：评估模型在长期预测中的误差累积情况。
+- **示例**：
+  ```python
+  def multi_step_metrics(y_true, y_pred, steps):
+      metrics = {}
+      for step in range(1, steps+1):
+          rmse = np.sqrt(mean_squared_error(y_true[step-1::steps], y_pred[step-1::steps]))
+          mae = mean_absolute_error(y_true[step-1::steps], y_pred[step-1::steps]))
+          metrics[f"Step_{step}_RMSE"] = rmse
+          metrics[f"Step_{step}_MAE"] = mae
+      return metrics
+  ```
+
+#### **(2) 趋势捕捉能力**
+- **方法**：计算预测序列与真实序列的趋势相关性（如皮尔逊相关系数）。
+- **意义**：验证模型是否捕捉到数据的长期趋势。
+- **公式**：
+  \[
+  \text{Trend Correlation} = \frac{\text{Cov}(y_{\text{trend}}, \hat{y}_{\text{trend}})}{\sigma_{y_{\text{trend}}} \sigma_{\hat{y}_{\text{trend}}}}
+  \]
+
+---
+
+### **3. 业务相关指标**
+#### **(1) 峰值预测准确率**
+- **定义**：在流量峰值时间点（如前1%的高流量点），计算预测值与真实值的匹配度。
+- **公式**：
+  \[
+  \text{Peak Accuracy} = \frac{1}{k} \sum_{i \in \text{Peaks}}} \left(1 - \frac{|y_i - \hat{y}_i|}{y_i}\right)
+  \]
+- **意义**：关键业务节点（如突发流量）的预测可靠性。
+
+#### **(2) 误差分布分析**
+- **方法**：绘制预测误差的直方图或箱线图，分析误差的偏态、峰态及异常值比例。
+- **工具**：
+  ```python
+  import seaborn as sns
+  errors = y_true - y_pred
+  sns.histplot(errors, kde=True)  # 误差分布直方图
+  sns.boxplot(x=errors)           # 误差箱线图
+  ```
+
+---
+
+### **4. 模型稳定性评估**
+#### **(1) 时间序列交叉验证（Time Series Split）**
+- **方法**：按时间顺序划分多个训练-测试窗口，计算各窗口的指标均值和方差。
+- **意义**：验证模型在不同时间段的表现稳定性。
+- **示例**（使用`sklearn`）：
+  ```python
+  from sklearn.model_selection import TimeSeriesSplit
+  tscv = TimeSeriesSplit(n_splits=5)
+  for train_index, test_index in tscv.split(X):
+      X_train, X_test = X[train_index], X[test_index]
+      y_train, y_test = y[train_index], y[test_index]
+      # 训练模型并计算指标
+  ```
+
+#### **(2) 滚动预测验证（Walk-Forward Validation）**
+- **方法**：逐步扩展训练集，预测下一步并追加到训练数据中。
+- **意义**：模拟实时预测场景，评估模型的持续适应能力。
+
+---
+
+### **5. 归一化指标（可选）**
+- **归一化RMSE（Normalized RMSE）**：
+  \[
+  \text{NRMSE} = \frac{\text{RMSE}}{y_{\text{max}} - y_{\text{min}}}
+  \]
+- **归一化MAE（Normalized MAE）**：
+  \[
+  \text{NMAE} = \frac{\text{MAE}}{y_{\text{max}} \times 100\%
+  \]
+- **适用场景**：不同量纲数据集间的模型性能对比。
+
+---
+
+### **最终推荐指标组合**
+| **指标类型**       | **推荐指标**                | **用途**                               |
+|---------------------|-----------------------------|----------------------------------------|
+| 基础精度评估       | RMSE, MAE, R²               | 整体预测精度与方差解释能力             |
+| 时间序列适应性     | 多步滚动RMSE/MAE            | 长期预测误差分析                       |
+| 业务关键点         | 峰值预测准确率              | 确保高流量时段的可靠性                 |
+| 模型稳定性         | 时间序列交叉验证均值与方差  | 验证模型在不同时间段的鲁棒性           |
+
+---
+
+### **代码实现示例**
+```python
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import numpy as np
+
+def evaluate_model(y_true, y_pred):
+    # 基础指标
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    mae = mean_absolute_error(y_true, y_pred))
+    r2 = r2_score(y_true, y_pred)
+    
+    # MAPE（确保无零值）
+    if np.any(y_true == 0):
+        mape = np.inf
+    else:
+        mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+    
+    # 峰值准确率（取前1%作为峰值）
+    peak_threshold = np.percentile(y_true, 99)
+    peak_indices = np.where(y_true >= peak_threshold)
+    peak_accuracy = 1 - np.mean(np.abs((y_true[peak_indices] - y_pred[peak_indices]) / y_true[peak_indices]))
+    
+    return {
+        "RMSE": rmse,
+        "MAE": mae,
+        "R²": r2,
+        "MAPE (%)": mape,
+        "Peak Accuracy": peak_accuracy
+    }
+
+# 使用示例
+y_true = np.array([...])  # 真实值
+y_pred = np.array([...])  # 预测值
+metrics = evaluate_model(y_true, y_pred)
+print(metrics)
+```
+
+---
+
+### **总结**
+- **核心指标**：RMSE（精度）、MAE（鲁棒性）、R²（模型解释力）。
+- **时间序列特性**：多步滚动误差、趋势相关性。
+- **业务适配**：峰值准确率、误差分布分析。
+- **稳定性验证**：时间序列交叉验证、滚动预测。
+
+通过综合这些指标，可以全面评估LSTM模型在连续值预测任务中的性能，确保模型既具备高精度，又能满足实际业务需求。

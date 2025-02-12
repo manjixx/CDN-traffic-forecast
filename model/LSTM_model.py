@@ -3,10 +3,13 @@ import os
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import LSTM, Dropout, Dense,Sequential, callbacks
+import matplotlib.pyplot as plt
+from keras.layers import LSTM, Dropout, Dense
+from keras import Sequential, callbacks
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow import optimizers
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+
 
 
 class CgcpLSTM:
@@ -20,13 +23,13 @@ class CgcpLSTM:
         # 训练集占总样本的比例
         self.train_all_ratio = 0.875
         # 连续样本点数
-        self.continuous_sample_point_num = 20
+        self.continuous_sample_point_num = 6
         # 定义归一化：归一化到(0，1)之间
         self.scaler = MinMaxScaler(feature_range=(0, 1))
         # 每次喂入神经网络的样本数
         self.batch_size = 64
         # 数据集的迭代次数
-        self.epochs = 1000000
+        self.epochs = 1000
         # 每多少次训练集迭代，验证一次测试集
         self.validation_freq = 1
         # 配置模型
@@ -48,7 +51,7 @@ class CgcpLSTM:
         )
         # 配置断点续训文件
         self.checkpoint_save_path = os.path.abspath(
-            os.path.dirname(__file__)) + "\\checkpoint\\" + self.name + "_LSTM_stock.ckpt"
+            os.path.dirname(__file__)) + "/checkpoint/" + self.name + "_LSTM_stock.ckpt"
         if os.path.exists(self.checkpoint_save_path + '.index'):
             print('-' * 20 + "加载模型" + "-" * 20)
             self.model.load_weights(self.checkpoint_save_path)
@@ -76,9 +79,11 @@ class CgcpLSTM:
             raise Exception("数据源格式错误")
 
         # 对一维矩阵进行升维操作
+        print(data_array.shape)
+
         if len(data_array.shape) == 1:
             data_array = data_array.reshape(data_array.shape[0], 1)
-
+        print(data_array.shape)
         if data_array.shape[1] != 1:
             raise Exception("数据源形状有误")
 
@@ -150,6 +155,16 @@ class CgcpLSTM:
             print("val_loss:{}".format(val_loss))
         except:
             pass
+
+        plt.figure()
+
+        plt.plot(history.history['loss'], c='b', label='loss')
+
+        plt.plot(history.history['val_loss'], c='g', label='val_loss')
+
+        plt.legend()
+
+        plt.show()
 
     def save_args_to_file(self):
         """
@@ -294,12 +309,15 @@ class CgcpLSTM:
 
 if __name__ == '__main__':
     data_list = [x for x in range(1000)]
-    # print(data_list)
+
+    # data_list = np.load("../data/cdn_traffic_processed.npy")
+    print(data_list)
 
     # 初始化模型
     model = CgcpLSTM(name="浓度预测")
     # 获取训练和测试的相关参数
     train_set, test_set, x_train, y_train, x_test, y_test = model.make_x_y_train_and_test(data_list=data_list)
+    print(train_set.shape, x_train.shape, y_train.shape)
     # 训练模型
     model.train(x_train, y_train, x_test, y_test)
     # 对模型进行测试
