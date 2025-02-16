@@ -12,7 +12,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 
 
 
-class CgcpLSTM:
+class CDN_LSTM_MODEL:
     def __init__(self, name):
         """
         构造函数，初始化模型
@@ -23,23 +23,32 @@ class CgcpLSTM:
         # 训练集占总样本的比例
         self.train_all_ratio = 0.875
         # 连续样本点数
-        self.continuous_sample_point_num = 6
+        self.continuous_sample_point_num = 20
         # 定义归一化：归一化到(0，1)之间
         self.scaler = MinMaxScaler(feature_range=(0, 1))
         # 每次喂入神经网络的样本数
         self.batch_size = 64
         # 数据集的迭代次数
-        self.epochs = 1000
+        self.epochs = 1
         # 每多少次训练集迭代，验证一次测试集
         self.validation_freq = 1
         # 配置模型
         self.model = Sequential([
             # LSTM层（记忆体个数，是否返回输出（True：每个时间步输出ht，False：仅最后时间步输出ht））
             # 配置具有80个记忆体的LSTM层，每个时间步输出ht
-            LSTM(80, return_sequences=True),
+            LSTM(32, return_sequences=True),
             Dropout(0.2),
-            # 配置具有100个记忆体的LSTM层，仅在最后一步返回ht
-            LSTM(100),
+            LSTM(64, return_sequences=True),
+            Dropout(0.2),
+            LSTM(128, return_sequences=True),
+            Dropout(0.2),
+            LSTM(256, return_sequences=True),
+            Dropout(0.2),
+            LSTM(128, return_sequences=True),
+            Dropout(0.2),
+            LSTM(64, return_sequences=True),
+            Dropout(0.2),
+            LSTM(32, return_sequences=True),
             Dropout(0.2),
             Dense(1)
         ])
@@ -71,26 +80,11 @@ class CgcpLSTM:
         :return: train_set, test_set 归一化处理后的训练集合测试集
         """
         # 将历史数据装换为ndarray
-        if isinstance(data_list, list):
-            data_array = np.array(data_list)
-        elif isinstance(data_list, np.ndarray):
-            data_array = data_list
-        else:
-            raise Exception("数据源格式错误")
-
-        # 对一维矩阵进行升维操作
-        print(data_array.shape)
-
-        if len(data_array.shape) == 1:
-            data_array = data_array.reshape(data_array.shape[0], 1)
-        print(data_array.shape)
-        if data_array.shape[1] != 1:
-            raise Exception("数据源形状有误")
 
         # 按照比例对数据进行分割
-        index = int(data_array.shape[0] * self.train_all_ratio)
-        train_set = data_array[:index, :]
-        test_set = data_array[index:, :]
+        index = int(data_list.shape[0] * self.train_all_ratio)
+        train_set = data_list[:index, :]
+        test_set = data_list[index:, :]
 
         print("train_set_shape:{}".format(train_set.shape))
         # 对训练集和测试集进行归一化处理
@@ -110,8 +104,8 @@ class CgcpLSTM:
         # 求得训练集的最大值，最小值这些训练集固有的属性，并在训练集上进行归一化
         train_set_scaled = self.scaler.fit_transform(train_set)
         # 利用训练集的属性对测试集进行归一化
-        test_set = self.scaler.transform(test_set)
-        return train_set_scaled, test_set
+        test_set_scaled = self.scaler.transform(test_set)
+        return train_set_scaled, test_set_scaled
 
     def denormalization(self, data_set):
         """
@@ -196,8 +190,16 @@ class CgcpLSTM:
 
         # 测试集输入模型进行预测
         predicted_cdn_traffic = self.model.predict(x_test)
+        print("predicted_cdn_traffic.{}".format(predicted_cdn_traffic.shape))
+        # predicted_cdn_traffic = np.expand_dims(predicted_cdn_traffic, axis=2)
+        predicted_squeezed = predicted_cdn_traffic.squeeze(axis=)  # 若原始形状为 (N, 1, 1)
+
         # 对预测数据还原---从（0，1）反归一化到原始范围
-        predicted_cdn_traffic = self.denormalization(predicted_cdn_traffic)
+        print("x_test[:, :-1].{}".format(x_test[:, :, :-1].shape))
+        print("predicted_cdn_traffic.{}".format(predicted_cdn_traffic.shape))
+
+        predict_set = np.concatenate((x_test[:, : , :-1], predicted_cdn_traffic), axis=1)
+        predicted_cdn_traffic = self.denormalization(predict_set)
 
         # 对真实数据还原---从（0，1）反归一化到原始范围
         real_cdn_traffic = self.denormalization(test_set[self.continuous_sample_point_num:])
@@ -213,7 +215,7 @@ class CgcpLSTM:
         print('均方根误差: %.6f' % rmse)
         print('平均绝对误差: %.6f' % mae)
 
-    def make_x_y_train_and_test(self, data_list):
+    def train_test_split(self, data_list):
         """
         制作x_train（训练集输入特征）, y_train（训练集标签）, x_test（测试集输入特征）, y_test（测试集标签）
         :param data_list:
@@ -226,8 +228,8 @@ class CgcpLSTM:
 
         # 利用for循环，遍历整个训练集，提取训练集中连续样本为训练集输入特征和标签
         for i in range(self.continuous_sample_point_num, len(train_set)):
-            x_train.append(train_set[i - self.continuous_sample_point_num:i, 0])
-            y_train.append(train_set[i, 0])
+            x_train.append(train_set[i - self.continuous_sample_point_num:i, :])
+            y_train.append(train_set[i-1:i, -1])
         # 对训练集进行打乱
         np.random.seed(7)
         np.random.shuffle(x_train)
@@ -238,16 +240,21 @@ class CgcpLSTM:
         x_train, y_train = np.array(x_train), np.array(y_train)
 
         # 使x_train符合RNN输入要求：[送入样本数， 循环核时间展开步数， 每个时间步输入特征个数]。
-        x_train = self.change_data_to_rnn_input(x_train)
+        # x_train = self.change_data_to_rnn_input(x_train)
         # 测试集
         # 利用for循环，遍历整个测试集，提取训练集中连续样本为训练集输入特征和标签
         for i in range(self.continuous_sample_point_num, len(test_set)):
-            x_test.append(test_set[i - self.continuous_sample_point_num:i, 0])
-            y_test.append(test_set[i, 0])
+            x_test.append(test_set[i - self.continuous_sample_point_num:i, :])
+            y_test.append(test_set[i - 1:i, -1])
         # 测试集变array并reshape为符合RNN输入要求：[送入样本数， 循环核时间展开步数， 每个时间步输入特征个数]
         x_test, y_test = np.array(x_test), np.array(y_test)
+        print("x_train_shape：{}".format(x_train.shape))
+        print("y_train_shape：{}".format(y_train.shape))
         print("x_test_shape：{}".format(x_test.shape))
-        x_test = self.change_data_to_rnn_input(x_test)
+        print("y_test_shape：{}".format(y_test.shape))
+        print("train_set_shape：{}".format(train_set.shape))
+        print("test_set_shape：{}".format(test_set.shape))
+        # x_test = self.change_data_to_rnn_input(x_test)
         return train_set, test_set, x_train, y_train, x_test, y_test
 
     def change_data_to_rnn_input(self, data_array):
@@ -308,15 +315,15 @@ class CgcpLSTM:
 
 
 if __name__ == '__main__':
-    data_list = [x for x in range(1000)]
+    # data_list = [x for x in range(1000)]
 
-    # data_list = np.load("../data/cdn_traffic_processed.npy")
+    data_list = np.load("../data/cdn_traffic_processed.npy")
     print(data_list)
 
     # 初始化模型
-    model = CgcpLSTM(name="浓度预测")
+    model = CDN_LSTM_MODEL(name="流量预测")
     # 获取训练和测试的相关参数
-    train_set, test_set, x_train, y_train, x_test, y_test = model.make_x_y_train_and_test(data_list=data_list)
+    train_set, test_set, x_train, y_train, x_test, y_test = model.train_test_split(data_list=data_list)
     print(train_set.shape, x_train.shape, y_train.shape)
     # 训练模型
     model.train(x_train, y_train, x_test, y_test)

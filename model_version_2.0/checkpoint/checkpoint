@@ -1,0 +1,2 @@
+model_checkpoint_path: "\346\265\201\351\207\217\351\242\204\346\265\213_V0.2.1_LSTM_cdn.ckpt"
+all_model_checkpoint_paths: "\346\265\201\351\207\217\351\242\204\346\265\213_V0.2.1_LSTM_cdn.ckpt"

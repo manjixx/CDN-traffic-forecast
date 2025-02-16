@@ -1,0 +1,2 @@
+model_checkpoint_path: "model_version_2.0\\checkpoint\\\346\265\201\351\207\217\351\242\204\346\265\213_V0.2_LSTM_stock.ckpt"
+all_model_checkpoint_paths: "model_version_2.0\\checkpoint\\\346\265\201\351\207\217\351\242\204\346\265\213_V0.2_LSTM_stock.ckpt"
