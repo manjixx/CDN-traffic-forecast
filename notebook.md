@@ -541,3 +541,222 @@ print(metrics)
 - **稳定性验证**：时间序列交叉验证、滚动预测。
 
 通过综合这些指标，可以全面评估LSTM模型在连续值预测任务中的性能，确保模型既具备高精度，又能满足实际业务需求。
+
+
+## 版本处理逻辑
+
+```python
+import pandas as pd
+
+def calculate_metrics(file_path):
+    # 读取数据
+    df = pd.read_csv(file_path, sep='\t')  # 假设数据是用制表符分隔的
+    
+    # 计算每个时间点开放的版本包数量
+    version_count = df.groupby('开放时间')['版本id'].nunique()
+    
+    # 计算每个时间点的开放在网量总数
+    total_open_network = df.groupby('开放时间')['开放在网量'].sum()
+    
+    # 计算每个时间点的版本包大小平均值
+    avg_package_size = df.groupby('开放时间')['版本包大小'].mean()
+    
+    # 计算每个版本 在网量 * 版本包大小 的和
+    df['在网量_版本包大小'] = df['在网量'] * df['版本包大小']
+    total_network_size = df.groupby('开放时间')['在网量_版本包大小'].sum()
+    
+    # 处理开放比例（根据开放尾号）
+    def compute_open_ratio(row, prev_ratios):
+        tail_num = str(row['开放尾号'])
+        if tail_num.lower() == 'all':
+            return 1 - prev_ratios.get(row['版本id'], 0)  # 计算剩余比例
+        else:
+            ratio = 10 ** (-len(tail_num))
+            prev_ratios[row['版本id']] = prev_ratios.get(row['版本id'], 0) + ratio
+            return ratio
+    
+    prev_ratios = {}  # 存储每个版本之前的开放比例
+    df['计算开放比例'] = df.apply(lambda row: compute_open_ratio(row, prev_ratios), axis=1)
+    
+    # 返回计算结果
+    return {
+        '版本包数量': version_count,
+        '开放在网量总数': total_open_network,
+        '平均版本包大小': avg_package_size,
+        '在网量_版本包大小之和': total_network_size,
+        '计算开放比例': df[['版本id', '开放时间', '计算开放比例']]
+    }
+
+# 示例调用
+# result = calculate_metrics("data.tsv")
+# print(result)
+
+```
+
+```python
+import pandas as pd
+
+def parse_open_ratio(row, open_ratios):
+    """
+    解析开放尾号与开放比例的关系，并计算最终的开放比例。
+    """
+    if row['开放尾号'] == 'all':
+        # 如果是 all，则用 1 减去该版本之前的总开放比例
+        prev_open_ratio = open_ratios.get(row['版本号'], 0)
+        return 1 - prev_open_ratio
+    else:
+        # 计算开放比例，尾号长度决定比例
+        digits = len(str(row['开放尾号']))
+        return 10 ** (-digits)
+
+def calculate_metrics(file_path):
+    # 读取数据
+    df = pd.read_csv(file_path, sep='\t')  # 读取 TSV 格式的文件
+    
+    # 计算每个版本的累积开放比例
+    open_ratios = {}
+    df['最终开放比例'] = df.apply(lambda row: parse_open_ratio(row, open_ratios), axis=1)
+    
+    # 更新已开放的比例
+    for index, row in df.iterrows():
+        version = row['版本号']
+        open_ratios[version] = open_ratios.get(version, 0) + row['最终开放比例']
+    
+    # 计算开放在网量
+    df['开放在网量计算'] = df['最终开放比例'] * df['在网量']
+    
+    # 计算所需指标
+    result = df.groupby('开放时间').agg(
+        开放版本数量=('版本号', 'count'),
+        开放在网量总数=('开放在网量计算', 'sum'),
+        平均版本包大小=('版本包大小', 'mean'),
+        在网量_版本包大小总和=('在网量', lambda x: (x * df.loc[x.index, '版本包大小']).sum())
+    ).reset_index()
+    
+    print(result)
+    return result
+
+# 调用函数，传入数据集路径
+# calculate_metrics("data.tsv")
+
+```
+
+```python
+import pandas as pd
+
+def parse_open_ratio(open_tail, previous_ratios):
+    """
+    根据开放尾号计算开放比例。
+    - 一位数：10%
+    - 两位数：1%
+    - 三位数：0.1%
+    - 'all'：剩余未开放的部分（1 - sum(之前的开放比例)）
+    """
+    if open_tail.lower() == 'all':
+        return max(0, 1 - sum(previous_ratios))
+    elif open_tail.isdigit():
+        return len(open_tail) * (10 ** -len(open_tail))
+    return 0  # 处理异常情况
+
+def analyze_data(file_path):
+    df = pd.read_csv(file_path, sep='\t')  # 读取 TSV 文件
+    
+    df['开放时间'] = pd.to_datetime(df['开放时间'])  # 转换时间格式
+    df = df.sort_values(by='开放时间')  # 按开放时间排序
+    
+    result = {}
+    version_ratios = {}  # 记录每个版本的累计开放比例
+    
+    for _, row in df.iterrows():
+        time = row['开放时间']
+        version = row['版本号']
+        size = row['版本包大小']
+        online_count = row['在网量']
+        open_tail = str(row['开放尾号'])
+        
+        if version not in version_ratios:
+            version_ratios[version] = []
+        
+        open_ratio = parse_open_ratio(open_tail, version_ratios[version])
+        version_ratios[version].append(open_ratio)
+        
+        open_online_count = open_ratio * online_count  # 计算开放在网量
+        weighted_online_size = open_online_count * size  # (在网量 * 版本包大小)
+        
+        if time not in result:
+            result[time] = {'count': 0, 'total_open_online': 0, 'total_size': 0, 'weighted_size_sum': 0}
+        
+        result[time]['count'] += 1
+        result[time]['total_open_online'] += open_online_count
+        result[time]['total_size'] += size
+        result[time]['weighted_size_sum'] += weighted_online_size
+    
+    for time in result:
+        result[time]['avg_size'] = result[time]['total_size'] / result[time]['count'] if result[time]['count'] > 0 else 0
+    
+    # 转换为 DataFrame 方便查看
+    result_df = pd.DataFrame.from_dict(result, orient='index')
+    result_df.index.name = '开放时间'
+    return result_df
+
+# 示例调用（请替换为你的数据文件路径）
+# df_result = analyze_data('data.tsv')
+# print(df_result)
+
+```
+
+
+```python
+# deepseek
+import pandas as pd
+
+def analyze_data(file_path):
+    # 读取数据并添加列名
+    df = pd.read_csv(file_path, sep='\t', header=None, names=[
+        "索引", "编号", "版本id", "规则id", "默认开放策略",
+        "版本号", "开放时间", "开放尾号", "升级策略",
+        "版本包大小", "原版本号", "在网量", "开放比例", "开放在网量"
+    ])
+    
+    # 转换时间格式并排序
+    df['开放时间'] = pd.to_datetime(df['开放时间'], format='%d/%m/%Y %H:%M:%S')
+    df = df.sort_values(by='开放时间')
+
+    # --- 关键改进1：向量化计算开放比例 ---
+    def calculate_ratio(group):
+        group = group.sort_values('开放时间')
+        ratios = []
+        cum_ratio = 0.0
+        
+        for _, row in group.iterrows():
+            tail = str(row['开放尾号']).strip().lower()
+            if tail == 'all':
+                ratio = max(0.0, 1.0 - cum_ratio)
+                cum_ratio = 1.0  # 标记已完全开放
+            else:
+                # 根据尾号位数计算比例
+                ratio = 10 ** (-len(tail)) if tail.isdigit() else 0.0
+                cum_ratio += ratio
+            
+            ratios.append(ratio)
+        
+        return pd.Series(ratios, index=group.index)
+
+    # 按版本分组计算开放比例
+    df['计算开放比例'] = df.groupby('版本号', group_keys=False).apply(calculate_ratio)
+
+    # --- 关键改进2：高效聚合计算 ---
+    # 计算每个时间点的指标
+    result = df.groupby('开放时间').agg(
+        版本包数量=('版本号', 'nunique'),
+        开放在网量总数=('在网量', lambda x: (x * df.loc[x.index, '计算开放比例']).sum()),
+        平均版本包大小=('版本包大小', 'mean'),
+        在网量_版本包总和=('在网量', lambda x: (x * df.loc[x.index, '版本包大小'] * df.loc[x.index, '计算开放比例']).sum())
+    )
+
+    return result
+
+# 示例调用
+# result = analyze_data('data.tsv')
+# print(result)
+```
