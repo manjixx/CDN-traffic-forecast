@@ -53,7 +53,7 @@ version_schedule = {
 # ========================
 def generate_features(df, version_schedule):
     # 初始化字段
-    df["version"] = "None"
+    df["version.csv"] = "None"
     df["batch_id"] = "None"
     df["active_users"] = BASE_USERS_MEAN
     df["update_size_gb"] = 0.0
@@ -78,7 +78,7 @@ def generate_features(df, version_schedule):
             mask = (df["timestamp"] >= batch_start) & (df["timestamp"] < batch_end)
 
             # 更新版本信息
-            df.loc[mask, "version"] = ver
+            df.loc[mask, "version.csv"] = ver
             df.loc[mask, "batch_id"] = batch["batch_id"]
             df.loc[mask, "update_size_gb"] = update_size
 
