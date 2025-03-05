@@ -143,7 +143,8 @@ class HierarchicalEnv(gym.Env):
         if 0 <= action[0] <=4 and any(v['size']>500 for v in versions):
             return False
         return True
-```
+```    
+
 
 ## 4. 带掩码的DQN智能体
 ```python
