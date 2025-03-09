@@ -265,7 +265,7 @@ class SystemMonitor:
 
 ## 7. 主程序集成
 ```python
-# main.py
+# main
 
 def main():
     # 初始化组件
@@ -310,12 +310,12 @@ pip install tensorflow ray psutil gym scikit-learn pandas
 
 2. **训练模型**
 ```bash
-python main.py --mode train --model residual_lstm --workers 8
+python main --mode train --model residual_lstm --workers 8
 ```
 
 3. **部署服务**
 ```bash
-python main.py --mode deploy --predictor cdn_predictor.h5 --agent dqn_agent
+python main --mode deploy --predictor cdn_predictor.h5 --agent dqn_agent
 ```
 
 4. **监控仪表盘**
