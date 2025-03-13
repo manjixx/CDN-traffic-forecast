@@ -1,11 +1,194 @@
+import keras
 import numpy as np
 import tensorflow as tf
-from keras import layers
+import tensorflow_probability as tfp
+from keras import layers, optimizers, losses
 from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+
+from .configs import RLConfig
+
+# Actor 网络
+class Actor(keras.Model):
+    def __init__(self, state_dim, action_dim):
+        super(Actor, self).__init__()
+        self.actor = keras.Sequential([
+            layers.Dense(64, activation="tanh", input_shape=state_dim),  # 输入层到隐藏层
+            layers.Dense(action_dim),   # 隐藏层到输出层
+            layers.Softmax(axis=-1)     # 输出层应用Softmax
+        ])
+    def call(self, state):
+        # 前向传播，返回动作概率
+        return self.actor(state)
+
+# Critic 网络（）
+class Critic(keras.Model):
+    def __init__(self, state_dim, action_dim):
+        super(Critic, self).__init__()
+        # Critic 网络：状态价值评估
+        self.critic = keras.Sequential([
+            layers.Dense(64, input_shape=state_dim, activation='tanh'), # 输入层到隐藏层
+            layers.Dense(1) # 输出状态价值（线性层）
+        ])
+
+    def call(self, state):
+        # 前向传播，返回动作分布概率
+        return self.critic(state)
+
+class PPO:
+    def __int__(self,state_dim, action_dim, config):
+        self.config = config
+        self.actor = Actor(state_dim, action_dim)   # 初始化Actor网络
+        self.critic = Critic(state_dim) # 初始化 Critic 网络
+        self.actor_optimizer = optimizers.Adam(self.actor.parameters(), lr = config.lr)  # Actor 优化器
+        self.critic_optimizer = optimizers.Adam(self.critic.parameters(), lr = config.lr)  # Critic 优化器
+        # self.mse_loss = losses.mean_squared_error()
+
+    def get_action(self, state):
+        state = tf.convert_to_tensor([state], dtype=tf.float32)     # 转换为状态张量
+        action_probs = self.actor(state)    # 获取动作概率
+        dist = tfp.distributions.Categorical(probs = action_probs)  # 创建类别分布
+        action = dist.sample()  # 采样动作
+        action_log_prob = dist.log_prob(action) # 获取动作的对数概率
+        return action.item, action_log_prob.item    # 返回动作和对数概率
+
+    def compute_age(self, values, rewards, dones, next_value):
+        advantages = []
+        age = 0.0
+        for t in reversed(range(len(rewards))):
+            if t == len(rewards) - 1:
+                next_val = next_value   # 最后一步的下一个值
+            else:
+                next_val = values[t + 1]   # 其他步骤的下一个值
+
+            delta = rewards[t] + self.config.gamma * (next_val * (1 - dones[t])) - values[t] # TD 误差计算
+            gae = delta + self.config.gamma * self.config.gae_lambda * (1 - dones[t]) * age # 计算 GAE
+            advantages.insert(0, gae)   # 插入到优势列表开头
+
+        advantages = tf.convert_to_tensor(advantages, dtype=tf.float32)
+        return advantages
+
+    def update(self, states, actions, old_log_probs, rewards, dones, next_state):
+        # 转换为 TensorFlow 张量
+        states = tf.convert_to_tensor(np.array(states), dtype=tf.float32)   # 转换状态为张量
+        actions = tf.convert_to_tensor(actions, dtype=tf.int32)             # 转换动作为张量
+        old_log_probs = tf.convert_to_tensor(old_log_probs, dtype=tf.float32)   # 转换旧的对数概率为张量
+        dones = tf.convert_to_tensor(dones, dtype=tf.float32)
+        rewards = tf.convert_to_tensor(rewards, dtype=tf.float32)
+        # 计算 GAE
+        with tf.stop_gradient:
+            values = tf.squeeze(self.critic(states))    # 获取当前状态的价值
+            next_value = tf.squeeze(self.critic(next_state))    # 获取下一个状态的价值
+
+        values_np = values.numpy()  # 为了兼容原有计算方式
+        advantages = self.compute_gae(values_np.tolist(), rewards, dones, next_value.numpy())   # 计算优势
+        returns = advantages + values   # 计算回报，即优势+状态价值，因为advantages是基于TD误差的是相对值，所以需要加上状态价值得到绝对值，来稳定训练
+        advantages = (advantages - tf.reduce_mean(advantages)) / (tf.math.reduce_std(advantages) + 1e-8)    # 标准化优势
+
+
+        # 创建数据集
+        dataset = tf.data.Dataset.from_tensor_slices(
+            (states, actions, old_log_probs, advantages, returns)
+        ).shuffle(len(states)).batch(self.config.batch_size)
+
+        # PPO 多轮更新
+        for _ in range(self.config.ppo_epochs):
+            for batch in dataset:
+                # 获取小批量状态、获取小批量动作、获取小批量旧的对数概率、获取小批量优势、获取小批量回报
+                batch_states, batch_actions, batch_old_log_probs, batch_advantages, batch_returns = batch
+
+                with tf.GradientTape(persistent=True) as tape:
+                    # 计算新的动作概率
+                    action_probs = self.actor(batch_states)
+                    dist = tfp.distributions.Categorical(probs=action_probs)
+                    new_log_probs = dist.log_prob(batch_actions)
+
+                    # 计算比率和裁剪后的目标
+                    ratio = tf.exp(new_log_probs - batch_old_log_probs)
+                    surr1 = ratio * batch_advantages
+                    surr2 = tf.clip_by_value(ratio, 1 - self.config.clip_epsilon,
+                                             1 + self.config.clip_epsilon) * batch_advantages
+                    # 计算熵
+                    entropy = tf.reduce_mean(dist.entropy())
+
+                    # 计算Actor损失（加入熵正则化项）
+                    actor_loss = -tf.reduce_mean(tf.minimum(surr1, surr2)) - self.config.entropy_coef * entropy
+
+                    # 计算 Critic 损失
+                    critic_values = tf.squeeze(self.critic(batch_states))
+                    critic_loss = self.mse_loss(critic_values, batch_returns)
+
+                # 更新 Actor
+                actor_grads = tape.gradient(actor_loss, self.actor.trainable_variables)
+                self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor.trainable_variables))
+
+                # 更新 Critic
+                critic_grads = tape.gradient(critic_loss, self.critic.trainable_variables)
+                self.critic_optimizer.apply_gradients(zip(critic_grads, self.critic.trainable_variables))
+
+                del tape  # 清除持久梯度带
+
+    def train_ppo(sel):
+        config = RLConfig()  # 初始化配置
+        # env = gym.make("CartPole-v1")  # 创建环境
+        state_dim = env.observation_space.shape[0]  # 获取状态维度
+        action_dim = env.action_space.n  # 获取动作维度
+
+        agent = PPO(state_dim, action_dim, config)  # 初始化PPO智能体
+
+        rewards = []  # 用于存储每个回合的奖励 (保持相同)
+
+        for episode in range(config.max_episodes):
+            state = env.reset()[0]  # 重置环境
+            states, actions, rewards_buffer, log_probs, dones = [], [], [], [], []  # 初始化存储变量 (保持相同)
+            total_reward = 0  # 初始化总奖励
+
+            for step in range(config.max_steps):
+                action, log_prob = agent.get_action(state)  # 获取动作和对数概率
+                next_state, reward, done, _, _ = env.step(
+                    action.numpy()[0] if tf.is_tensor(action) else action)  # 执行动作
+
+                states.append(state)  # 存储状态
+                actions.append(action.numpy() if tf.is_tensor(action) else action)  # 存储动作
+                rewards_buffer.append(reward)  # 存储奖励
+                log_probs.append(log_prob.numpy() if tf.is_tensor(log_prob) else log_prob)  # 存储对数概率
+                dones.append(done)  # 存储是否结束
+
+                total_reward += reward  # 累加奖励
+                state = next_state  # 更新状态
+
+                if done:
+                    break
+
+
+            agent.update(
+                states,
+                actions,
+                log_probs,
+                rewards,
+                dones,
+                next_state  # 最后一个next_state已经是numpy数组
+            )  # 更新智能体 (内部实现改为TF)
+
+            rewards.append(total_reward)  # 记录每个回合的奖励
+            print(f"Episode {episode + 1}, Total Reward: {total_reward}")  # 打印当前回合的奖励
+
+            if total_reward >= 500:
+                print("Solved!")  # 终止条件
+                break
+
+        env.close()  # 关闭环境
+
+        # 绘制reward曲线
+        plt.plot(rewards)
+        plt.title('Training Rewards')
+        plt.xlabel('Episode')
+        plt.ylabel('Reward')
+        plt.show()
 
 
 # 环境类（添加时间约束和动态预测）
-class VersionOptimizationEnv:
+class VersionEnv:
     def __init__(self, initial_bandwidth_pred, existing_versions, new_versions, start_date):
         self.current_bandwidth = initial_bandwidth_pred  # 初始预测
         self.existing_versions = existing_versions
@@ -94,83 +277,16 @@ class VersionOptimizationEnv:
         """实际需要接入预测服务，这里用随机生成示例"""
         return self.current_bandwidth * np.random.uniform(0.9, 1.1, len(self.current_bandwidth))
 
-
-# Actor-Critic网络（TensorFlow实现）
-class ActorCritic(tf.keras.Model):
-    def __init__(self, state_dim, action_dim):
-        super(ActorCritic, self).__init__()
-        self.actor = tf.keras.Sequential([
-            layers.Dense(256, activation='relu'),
-            layers.Dense(128, activation='relu'),
-            layers.Dense(action_dim, activation='tanh')  # 输出[-1,1]
-        ])
-        self.critic = tf.keras.Sequential([
-            layers.Dense(256, activation='relu'),
-            layers.Dense(128, activation='relu'),
-            layers.Dense(1)
-        ])
-
-    def call(self, inputs):
-        return self.actor(inputs), self.critic(inputs)
-
-
-# PPO Agent
-class PPOAgent:
-    def __init__(self, state_dim, action_dim, clip_ratio=0.2, gamma=0.99, lr=3e-4):
-        self.policy = ActorCritic(state_dim, action_dim)
-        self.optimizer = tf.keras.optimizers.Adam(lr)
-        self.clip_ratio = clip_ratio
-        self.gamma = gamma
-
-    def act(self, state):
-        state = tf.expand_dims(tf.convert_to_tensor(state), 0)
-        action_mean, _ = self.policy(state)
-        return action_mean.numpy()[0]
-
-    def update(self, states, actions, rewards, next_states):
-        states = tf.convert_to_tensor(states)
-        actions = tf.convert_to_tensor(actions)
-        rewards = tf.convert_to_tensor(rewards)
-        next_states = tf.convert_to_tensor(next_states)
-
-        with tf.GradientTape() as tape:
-            # 计算新旧策略概率
-            new_means, values = self.policy(states)
-            _, next_values = self.policy(next_states)
-
-            # 计算优势
-            advantages = rewards + self.gamma * next_values - values
-
-            # PPO损失
-            ratio = tf.exp(self._logprob(new_means, actions) - tf.stop_gradient(self._logprob(old_means, actions))
-            surr1 = ratio * advantages
-            surr2 = tf.clip_by_value(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio) * advantages
-            actor_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
-
-            # Critic损失
-            critic_loss = tf.reduce_mean(tf.square(rewards + self.gamma * next_values - values))
-
-            total_loss = actor_loss + 0.5 * critic_loss
-
-            grads = tape.gradient(total_loss, self.policy.trainable_variables)
-            self.optimizer.apply_gradients(zip(grads, self.policy.trainable_variables))
-
-    def _logprob(self, means, actions):
-        # 计算对数概率（假设标准差为0.3）
-        std = tf.ones_like(means) * 0.3
-        dist = tfp.distributions.Normal(means, std)
-        return dist.log_prob(actions)
-
 # 创建推理专用类
 class VersionOptimizer:
     def __init__(self, model_path):
-        self.agent = PPOAgent(state_dim=5, action_dim=4)
+        self.agent = PPO(state_dim=5, action_dim=4)
         self.agent.load_model(model_path)
         self.env = None  # 需在实际使用时初始化
 
     def initialize_env(self, bandwidth_pred, versions, start_date):
         """初始化环境"""
-        self.env = VersionOptimizationEnv(
+        self.env = VersionEnv(
             initial_bandwidth_pred=bandwidth_pred,
             existing_versions=[],
             new_versions=versions,
